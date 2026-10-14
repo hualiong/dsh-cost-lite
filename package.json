@@ -1,0 +1,54 @@
+{
+  "name": "@hualiong/dsh-cost-lite",
+  "version": "0.1.1",
+  "description": "Real-money cost badges for DeepSeek Harness: a 「计费用量」 pill in the composer dock (session) and in each assistant message's action row (per turn), priced per model from the session's own token usage, with off-peak/peak tiers and official-provider-only billing.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "cost",
+    "billing",
+    "usage",
+    "cost-meter"
+  ],
+  "author": "hualiong",
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "locale",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hualiong/dsh-cost-lite.git"
+  },
+  "homepage": "https://github.com/hualiong/dsh-cost-lite#readme",
+  "bugs": {
+    "url": "https://github.com/hualiong/dsh-cost-lite/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

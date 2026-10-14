@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cost Meter",
+    "description": "Per-model real-money cost badges: session-level in the composer dock, per-turn in each assistant message's action row."
+  }
+}

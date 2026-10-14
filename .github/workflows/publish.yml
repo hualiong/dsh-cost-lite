@@ -1,0 +1,40 @@
+name: publish
+
+# Publishes a version tag with npm trusted publishing (OIDC): no NPM_TOKEN and no
+# 2FA prompt. Configure once on the package page:
+#   https://www.npmjs.com/package/@hualiong/dsh-cost-lite
+#   → Settings → Trusted Publisher → GitHub Actions
+#     organization/user: hualiong
+#     repository:        dsh-cost-lite
+#     workflow filename: publish.yml
+#     environment:       (leave empty)
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          # Deliberately no registry-url: it writes an empty
+          # //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN} placeholder into
+          # .npmrc, which shadows the OIDC credential this workflow relies on.
+
+      - name: Trusted publishing needs npm >= 11.5.1
+        run: npm install -g npm@latest
+
+      - name: The tag must match package.json
+        run: |
+          test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+
+      - name: Publish
+        run: npm publish --access public --provenance
