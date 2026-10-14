@@ -11,7 +11,7 @@ DSH 的**真实花费**徽标：把本会话的 token 用量按模型价目换�
 
 ## 计费口径
 
-* **供应商**：只统计价目表里能**精确**匹配到的（provider, model）组合，没有任何 provider 级兜底价；本轮没有官方用量时不显示徽标，混合轮次只计官方那一份。官方提供方为 `deepseek-account` / `deepseek-official`。
+* **供应商**：只统计价目表里能**精确**匹配到的（provider, model）组合，没有任何 provider 级兜底价。官方提供方为 `deepseek-account` / `deepseek-official`；一条助手消息只带一个模型，所以候选模型未登记的那一轮整条跳过、不渲染任何徽标，而多模型会话只累计其中官方的那部分。
 * **模型 key**（精确 id，只有两个）：`deepseek-flash`、`deepseek-v4-pro`。旧 id（`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`）**官方已不再提供**，价格表里也不再登记——精确匹配不到就不计费，不会套用同 provider 的 Flash 价。要恢复某个组合，只能显式写进 `config.models`（key 为 `<provider>/<model>`）。
 * **价目**（CNY / 1M tokens，取自 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing>，读取于 2026-10-11）：Flash 空闲 `缓存未命中 1 / 缓存命中 0.02 / 输出 4`；V4 Pro `4.5 / 0.15 / 13.5`（DeepSeek 只公布三档，`缓存写入` 记为 0）。
 * **高峰时段**：北京时间周一至周五 `9:00-12:00`、`14:00-18:00` 为高峰，价目 ×2；周末与法定节假日全天按空闲价。时段按**该条事件自己的 `time`**（epoch 毫秒，落盘后不再变）判定，所以同一个数不会在两次轮询之间漂移。节假日内置 2026 年列表（`src/index.js` 的 `PEAK_HOLIDAYS`），需要按年补充；未收录的工作日节假日会按高峰计价（只会高估，不会低估）。
@@ -19,11 +19,15 @@ DSH 的**真实花费**徽标：把本会话的 token 用量按模型价目换�
 
 ## 安装
 
-把本包加进 profile 的 `dependencies` 与 `dsh.profile.bundles`：
+```powershell
+dsh plugin --profile <profile> add @hualiong/dsh-cost-lite
+```
+
+`dsh plugin --profile <name> <pnpm 参数>` 是 DSH 自带的插件管理入口（参数转发给该 profile 目录下的 pnpm）。装完它会自动把新依赖里声明了 `dsh.bundle` 的包登记进 profile 的 `dsh.profile.bundles`——本包两者都具备，所以这一条命令就够了。等价的手工做法是改 `~/.dsh/profiles/<profile>/package.json`：
 
 ```jsonc
 {
-  "dependencies": { "@hualiong/dsh-cost-lite": "^0.1.1" },
+  "dependencies": { "@hualiong/dsh-cost-lite": "^0.1.2" },
   "dsh": { "profile": { "bundles": [ /* …, */ "@hualiong/dsh-cost-lite" ] } }
 }
 ```

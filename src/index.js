@@ -9,7 +9,8 @@
 //    clock, no randomness, no session-log writes (spec §6).
 //  - Sessions are seeded lazily from the committed log (`ownEvents()`) and then advanced
 //    from the live `session/event` feed. Each (provider, model) bucket is folded once and
-//    never re-read, so the endpoint stays O(new events) per poll instead of O(session).
+//    never re-read, so FOLDING stays O(new events) per poll instead of O(session); BUILDING
+//    the response is O(tracked messages + turns) every poll, bounded by the guards below.
 //  - Nothing may escape into the host: this file guards URL parsing, the sessions
 //    service, event shapes and the response writer. A detached session is a normal
 //    all-zero answer, not an error.
@@ -195,9 +196,7 @@ function foldEvent(state, event, pricing) {
   if (turnEntry === undefined) {
     turnEntry = { turn, step, models: new Map() }
     state.turns.set(turn, turnEntry)
-    // Evict the OLDEST turn (insertion-ordered Map) so the newest MAX_TURNS turns always
-    // survive. The earlier code refused new turns instead, which hid the turn the user was
-    // actually watching on a long session.
+    // Evict the OLDEST turn (insertion-ordered Map), so the newest MAX_TURNS turns survive.
     while (state.turns.size > MAX_TURNS) {
       const oldest = state.turns.keys().next()
       if (oldest.done) break
@@ -213,7 +212,6 @@ function foldEvent(state, event, pricing) {
     if (messageEntry === undefined) {
       messageEntry = { turn, step, models: new Map() }
       state.messages.set(messageId, messageEntry)
-      // Insertion-ordered Map: the first key is the oldest message.
       while (state.messages.size > MAX_MESSAGES) {
         const oldest = state.messages.keys().next()
         if (oldest.done) break

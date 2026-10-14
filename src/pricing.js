@@ -166,7 +166,6 @@ export function pricingFromConfig(config) {
   const currency = typeof cfg.currency === 'string' && cfg.currency.trim() !== '' ? cfg.currency.trim() : CURRENCY
   return {
     currency,
-    table,
     priceFor: (provider, model) => lookup(table, provider, model),
   }
 }

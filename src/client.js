@@ -382,10 +382,11 @@ window.__ModuleLoader__.load({
     // --- the two registered badges --------------------------------------------------
 
     // Both badges render ONLY once the host has positively priced the scope (user request:
-    // no 「—」 placeholder). `usage.priced` is the session TOTAL's flag -- the host bills every
-    // unpriced bucket as 0 and sets the flag when at least one model resolved (`index.js:282`),
-    // so a session that mixes DeepSeek with an unknown model shows the DeepSeek part instead
-    // of vanishing, and a session that is entirely unknown shows nothing at all.
+    // no 「—」 placeholder). `usage.priced` is the session TOTAL's flag: the host drops every
+    // unregistered model entirely and sets the flag when at least one bucket resolved
+    // (`index.js:361`), so a session mixing DeepSeek with an unknown model still shows the
+    // DeepSeek part, while a session whose models are all unknown shows nothing at all. One
+    // assistant message carries exactly one model, so a turn is either priced or absent.
     function SessionCostBadge({ sessionId, t }) {
       const usage = useCostUsage(sessionId)
       const session = usage !== null && typeof usage.session === 'object' && usage.session !== null ? usage.session : null
