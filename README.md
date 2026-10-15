@@ -4,14 +4,14 @@ DSH 的**真实花费**徽标：把本会话的 token 用量按模型价目换�
 
 | 位置 | 挂点 | 行 id | 文案 |
 | --- | --- | --- | --- |
-| 每条助手消息的操作行 | `conversation.chat.assistant-actions` | `cost-lite-turn`（order 20） | `计费 0.01 元` |
+| 每条助手消息的操作行（显示该消息所属**整轮**的合计） | `conversation.chat.assistant-actions` | `cost-lite-turn`（order 20） | `计费 0.01 元` |
 | 输入框停靠栏 | `conversation.composer.dock` | `cost-lite-session`（order 5） | `3.42 元` |
 
-点开任一徽标是一个与内置统计弹窗同款的浮层：标题是 `￥` 金额，下面按桶列出金额与单价（`未缓存输入 / 缓存读取 / 缓存写入 / 输出`，单价以 `￥x.xx/M` 表示）——**金额按各桶分别计价后相加**，与标题 6 位小数一致。单轮浮层多一行「提供方 / 模型」。
+点开任一徽标是一个与内置统计弹窗同款的浮层：标题是 `￥` 金额，下面按桶列出金额与单价（`未缓存输入 / 缓存读取 / 缓存写入 / 输出`，单价以 `￥x.xx/M` 表示）——**金额按各桶分别计价后相加**，与标题 6 位小数一致。操作行那个徽标的口径是**整轮**（一轮有多条助手消息，同一轮的每条消息显示同一个金额），因此它多一行「提供方 / 模型」，数字与内置「本轮用量」面板对齐；停靠栏那个是**整个会话**的合计，不列模型行。
 
 ## 计费口径
 
-* **供应商**：只统计价目表里能**精确**匹配到的（provider, model）组合，没有任何 provider 级兜底价。官方提供方为 `deepseek-account` / `deepseek-official`；一条助手消息只带一个模型，所以候选模型未登记的那一轮整条跳过、不渲染任何徽标，而多模型会话只累计其中官方的那部分。
+* **供应商**：只统计价目表里能**精确**匹配到的（provider, model）组合，没有任何 provider 级兜底价。官方提供方为 `deepseek-account` / `deepseek-official`；未登记的模型在折叠阶段整条跳过，所以整轮都没登记时该轮根本没有条目、不渲染任何徽标，而多模型会话只累计其中官方的那部分。
 * **模型 key**（精确 id，只有两个）：`deepseek-flash`、`deepseek-v4-pro`。旧 id（`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`）**官方已不再提供**，价格表里也不再登记——精确匹配不到就不计费，不会套用同 provider 的 Flash 价。要恢复某个组合，只能显式写进 `config.models`（key 为 `<provider>/<model>`）。
 * **价目**（CNY / 1M tokens，取自 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing>，读取于 2026-10-11）：Flash 空闲 `缓存未命中 1 / 缓存命中 0.02 / 输出 4`；V4 Pro `4.5 / 0.15 / 13.5`（DeepSeek 只公布三档，`缓存写入` 记为 0）。
 * **高峰时段**：北京时间周一至周五 `9:00-12:00`、`14:00-18:00` 为高峰，价目 ×2；周末与法定节假日全天按空闲价。时段按**该条事件自己的 `time`**（epoch 毫秒，落盘后不再变）判定，所以同一个数不会在两次轮询之间漂移。节假日内置 2026 年列表（`src/index.js` 的 `PEAK_HOLIDAYS`），需要按年补充；未收录的工作日节假日会按高峰计价（只会高估，不会低估）。
@@ -41,7 +41,7 @@ dsh plugin --profile <profile> add @hualiong/dsh-cost-lite
 
 profile 自己的 patch 文件按 `id: cost-lite` 覆盖该行来传配置（`config.models`、`config.currency`）或启停。改 `dependencies` / `bundles` 后必须**重启 DSH**：运行时解析器拒绝热替换。
 
-> 本包目前**独立发布**，尚未并入 `@hualiong/dsh-plugin-suite`；并入后这一行改由套件插入，profile 只需依赖套件。
+> 本包也可经 `@hualiong/dsh-plugin-suite`（1.3.0 起）随套件安装，套件里这一行默认 `disabled: true`，按需在插件列表里打开即可；两种方式装的是同一份代码，只需其一。
 
 ## 开发
 

@@ -385,8 +385,7 @@ window.__ModuleLoader__.load({
     // no 「—」 placeholder). `usage.priced` is the session TOTAL's flag: the host drops every
     // unregistered model entirely and sets the flag when at least one bucket resolved
     // (`index.js:361`), so a session mixing DeepSeek with an unknown model still shows the
-    // DeepSeek part, while a session whose models are all unknown shows nothing at all. One
-    // assistant message carries exactly one model, so a turn is either priced or absent.
+    // DeepSeek part, while a session whose models are all unknown shows nothing at all.
     function SessionCostBadge({ sessionId, t }) {
       const usage = useCostUsage(sessionId)
       const session = usage !== null && typeof usage.session === 'object' && usage.session !== null ? usage.session : null
@@ -394,15 +393,35 @@ window.__ModuleLoader__.load({
       return React.createElement(CostBadge, { record: session, isTurn: false, t })
     }
 
+    /**
+     * The `turns[...]` entry of the turn an assistant message belongs to (user request
+     * m00840). One turn spans many messages, and the badge in the action row has to line up
+     * with the built-in 「本轮用量」 popover beside it, so the scope is the whole turn: hop
+     * message -> `message.turn` -> `turns[turn]`. Both maps carry the same entry shape.
+     */
+    function turnRecordFor(usage, messageId) {
+      if (usage === null || typeof usage !== 'object') return null
+      const messages = usage.messages
+      const turns = usage.turns
+      if (typeof messages !== 'object' || messages === null) return null
+      if (typeof turns !== 'object' || turns === null) return null
+      const message = typeof messageId === 'string' ? messages[messageId] : undefined
+      if (message === null || typeof message !== 'object') return null
+      const turn = message.turn
+      if (typeof turn !== 'number' || !Number.isFinite(turn)) return null
+      const record = turns[turn]
+      return record === null || typeof record !== 'object' ? null : record
+    }
+
     function TurnCostBadge({ sessionId, messageId, t }) {
       const usage = useCostUsage(sessionId)
-      const messages = usage !== null && typeof usage.messages === 'object' && usage.messages !== null ? usage.messages : null
-      const record = messages !== null && typeof messageId === 'string' ? messages[messageId] : undefined
-      // No entry for this assistant message, or a route the price table does not know, or a
-      // host that has not answered yet => render nothing at all, so the badge can never show a
-      // neighbouring turn's number nor a placeholder. An assistant message carries exactly one
-      // model, so `record.priced` is the per-turn answer.
-      if (record === undefined || record === null || typeof record !== 'object') return null
+      const record = turnRecordFor(usage, messageId)
+      // No entry for this message, its turn already evicted, a turn the price table cannot
+      // price, or a host that has not answered yet => render nothing at all, so the badge can
+      // never show a neighbouring turn's number nor a placeholder. The host drops every
+      // unregistered model and sets `priced` once at least one bucket resolved, so the flag is
+      // the whole-turn answer.
+      if (record === null) return null
       if (record.priced !== true || typeof record.cost !== 'number') return null
       return React.createElement(CostBadge, { record, isTurn: true, t })
     }
