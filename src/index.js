@@ -11,6 +11,12 @@
 //    from the live `session/event` feed. Each (provider, model) bucket is folded once and
 //    never re-read, so FOLDING stays O(new events) per poll instead of O(session); BUILDING
 //    the response is O(tracked messages + turns) every poll, bounded by the guards below.
+//  - Subagent children fold in their OWN session states, discovered from the parent's
+//    `subagent/catalog` events (parent-owned, durable). A read merges the whole descendant
+//    tree into one `subagents` block and `allCost` = own + descendants. Child prefix
+//    (`ownEvents()` / `events.slice(inheritedEventCount)`) never re-counts parent turns:
+//    a fork child's log starts with a copy of the parent's events, and the inherited
+//    prefix is exactly what both read paths drop.
 //  - Nothing may escape into the host: this file guards URL parsing, the sessions
 //    service, event shapes and the response writer. A detached session is a normal
 //    all-zero answer, not an error.
@@ -30,10 +36,16 @@ const ROUTE = '/__cost-lite/usage'
 // ponytail: the true worst case is MAX_MESSAGES x 8 models ≈ 1 MB, above the ~256 KB hint;
 // the upgrade path is real per-entry truncation (or server-side paging), deliberately not
 // built while the badge only renders one session summary.
-const MAX_TRACKED_SESSIONS = 64
-const MAX_MODELS = 64
+// shortcut: per-session state is never evicted (a polled session keeps ~200 KB worst case);
+// add an eviction pass if a long-lived host ever polls thousands of distinct sessions.
 const MAX_MESSAGES = 400
 const MAX_TURNS = 200
+// Family walk guards: descendants beyond the cap are simply not summed on that read
+// (bounded BFS); the retry bound keeps one deleted child id from re-reading storage
+// every poll.
+const MAX_DESCENDANTS = 128
+const READ_RETRY_MS = 30000
+const READ_TIMEOUT_MS = 5000
 // Idempotence guard: a session log can hold thousands of events, so the chain of folded seq
 // numbers is bounded. The OLDEST seq is evicted first — never the whole set: clearing it
 // let a redelivered old event be folded twice.
@@ -121,10 +133,14 @@ function createSessionState() {
   return {
     seeded: false,
     seen: new Set(),
-    touchedAt: 0,
     models: new Map(),
     messages: new Map(),
     turns: new Map(),
+    // Direct-child session ids from `subagent/catalog` events in this session's OWN log.
+    childIds: new Set(),
+    // Cold-read bookkeeping for descendant seeding (see seedChildState).
+    loading: undefined,
+    nextTryAt: 0,
   }
 }
 
@@ -132,9 +148,8 @@ function addToBuckets(buckets, provider, model, tokens, peak) {
   const key = `${provider}\u0000${model}`
   let bucket = buckets.get(key)
   if (bucket === undefined) {
-    // Every distinct model keeps its tokens counted. MAX_MODELS only truncates the
-    // serialized breakdown in buildEntry(); refusing to create the 65th bucket here (the
-    // earlier behaviour) silently dropped that model's tokens from the session total.
+    // Every distinct model keeps its tokens counted; the bucket map is never capped, because
+    // dropping a bucket silently drops that model's tokens from the session total.
     bucket = {
       provider, model,
       input: 0, cacheRead: 0, cacheWrite: 0, output: 0,
@@ -165,7 +180,17 @@ function addToBuckets(buckets, provider, model, tokens, peak) {
  * a non-official turn instead of a zero.
  */
 function foldEvent(state, event, pricing) {
-  if (!isPlainObject(event) || event.type !== 'assistant/message') return
+  if (!isPlainObject(event)) return
+  // Parent-owned durable discovery fact: one catalog event names one direct child. It
+  // carries no usage, so the billable path below must never see it.
+  if (event.type === 'subagent/catalog') {
+    const childId = isPlainObject(event.data) ? event.data.childId : undefined
+    if (typeof childId === 'string' && childId !== '' && !UNSAFE_KEYS.has(childId) && state.childIds.size < MAX_DESCENDANTS) {
+      state.childIds.add(childId)
+    }
+    return
+  }
+  if (event.type !== 'assistant/message') return
   const data = event.data
   if (!isPlainObject(data)) return
   const usage = data.usage
@@ -247,30 +272,54 @@ function rememberSeq(state, seq) {
 }
 
 /**
- * Seed from the committed log exactly once.
+ * Seed from a caller-supplied event array exactly once (the cold-read path hands over a
+ * pre-sliced clone; the live-session path slices via `ownEvents()`).
  */
-function seedSession(state, session, pricing) {
+function seedSessionFromEvents(state, events, pricing) {
   // Mark seeded BEFORE folding. A fold that throws used to leave the session looking
   // unseeded while its tokens were already accumulated, so every later poll re-folded the
   // whole log and doubled the totals forever. With the per-event try/catch below, one
   // malformed record now costs one event instead of the entire session.
   state.seeded = true
+  if (!Array.isArray(events)) return
+  for (const event of events) {
+    try {
+      foldEvent(state, event, pricing)
+      const seq = isPlainObject(event) ? event.seq : undefined
+      if (typeof seq === 'number' && Number.isFinite(seq)) rememberSeq(state, seq)
+    } catch {
+      // Skip the malformed record and keep folding the rest of the log.
+    }
+  }
+}
+
+/** Seed a live session from its committed log; `ownEvents()` drops the fork-inherited prefix. */
+function seedSession(state, session, pricing) {
   let events = []
   try {
     if (typeof session.ownEvents === 'function') events = session.ownEvents()
   } catch {
     events = [] // a detached/half-open session: answer with whatever we can see
   }
-  if (Array.isArray(events)) {
-    for (const event of events) {
-      try {
-        foldEvent(state, event, pricing)
-        const seq = isPlainObject(event) ? event.seq : undefined
-        if (typeof seq === 'number' && Number.isFinite(seq)) rememberSeq(state, seq)
-      } catch {
-        // Skip the malformed record and keep folding the rest of the log.
-      }
+  seedSessionFromEvents(state, events, pricing)
+}
+
+/** Field-wise union of two per-model bucket maps; the copy never aliases the source. */
+function mergeBuckets(target, source) {
+  for (const [key, bucket] of source) {
+    const own = target.get(key)
+    if (own === undefined) {
+      target.set(key, { ...bucket })
+      continue
     }
+    own.input += bucket.input
+    own.cacheRead += bucket.cacheRead
+    own.cacheWrite += bucket.cacheWrite
+    own.output += bucket.output
+    own.inputPeak += bucket.inputPeak
+    own.cacheReadPeak += bucket.cacheReadPeak
+    own.cacheWritePeak += bucket.cacheWritePeak
+    own.outputPeak += bucket.outputPeak
   }
 }
 
@@ -356,10 +405,7 @@ function buildEntry(buckets, pricing) {
 
   // Sort by cost desc (spec §2); provider/model asc makes ties deterministic.
   models.sort((a, b) => (b.cost - a.cost) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model))
-  // `priced` must consider every bucket, so it is computed before MAX_MODELS trims the
-  // wire list; truncation only shortens the breakdown, never the totals above.
   const priced = models.some((entry) => entry.priced)
-  if (models.length > MAX_MODELS) models.length = MAX_MODELS
 
   const cacheDenominator = inputTokens + cacheReadTokens
   return {
@@ -375,12 +421,17 @@ function buildEntry(buckets, pricing) {
   }
 }
 
-function buildPayload(sessionId, state, pricing) {
+/**
+ * @param descendants - `{ models, count }` from the family walk: merged per-model buckets
+ * of every descendant session, and how many sessions were folded. `undefined` (no walk
+ * ran) means "omit the `subagents` block; `allCost` is the own cost".
+ */
+function buildPayload(sessionId, state, pricing, descendants) {
   const totals = buildEntry(state.models, pricing)
   // Spec §2 freezes the `session` key set: `priced` is a TOP-LEVEL field and also appears on
   // every messages/turns entry, but not on `session` — so it is lifted out here rather than
   // spread in (buildEntry always carries it for the per-message/turn entries).
-  const { priced, ...session } = totals
+  const { priced: ownPriced, ...session } = totals
 
   const messages = Object.create(null)
   for (const [messageId, entry] of state.messages) {
@@ -393,7 +444,30 @@ function buildPayload(sessionId, state, pricing) {
     turns[String(turn)] = { turn: entry.turn, step: entry.step, ...buildEntry(entry.models, pricing) }
   }
 
-  return { ok: true, sessionId, currency: pricing.currency, priced, session, messages, turns }
+  const sub = descendants === undefined ? undefined : buildEntry(descendants.models, pricing)
+  const subagents = sub === undefined ? undefined : {
+    count: descendants.count,
+    priced: sub.priced,
+    cost: sub.cost,
+    totalTokens: sub.totalTokens,
+  }
+  const subCost = subagents === undefined || !subagents.priced ? 0 : subagents.cost
+
+  return {
+    ok: true,
+    sessionId,
+    currency: pricing.currency,
+    // The flag is about the WHOLE answer the badge headlines: the session badge shows
+    // `allCost`, so it renders when either the own log or a descendant priced anything.
+    priced: ownPriced || subCost > 0,
+    // Headline for the session badge: own session + every descendant, rounded once at
+    // the top so the popover amount is the sum of its rows.
+    allCost: round(session.cost + subCost, 6),
+    session,
+    messages,
+    turns,
+    subagents,
+  }
 }
 
 // The client renders "—" for this shape and stays silent (spec §2): an unknown or
@@ -404,6 +478,7 @@ function buildEmptyPayload(sessionId, pricing) {
     sessionId,
     currency: pricing.currency,
     priced: false,
+    allCost: 0,
     session: {
       cost: 0,
       totalTokens: 0,
@@ -416,6 +491,7 @@ function buildEmptyPayload(sessionId, pricing) {
     },
     messages: Object.create(null),
     turns: Object.create(null),
+    subagents: { count: 0, priced: false, cost: 0, totalTokens: 0 },
   }
 }
 
@@ -460,26 +536,9 @@ function apply(ctx, config) {
 
   function stateFor(sessionId) {
     let state = states.get(sessionId)
-    const fresh = state === undefined
-    if (fresh) {
+    if (state === undefined) {
       state = createSessionState()
       states.set(sessionId, state)
-    }
-    // Stamp BEFORE the LRU scan below. A brand-new state carries `touchedAt: 0`, so stamping
-    // only at the end made it look like the oldest candidate on every insert and the
-    // `oldestKey !== sessionId` guard then skipped the delete — the cap never evicted
-    // anything and one state per session id stayed in memory forever.
-    state.touchedAt = Date.now()
-    if (fresh && states.size > MAX_TRACKED_SESSIONS) {
-      let oldestKey
-      let oldestAt = Infinity
-      for (const [key, candidate] of states) {
-        if (candidate.touchedAt < oldestAt) {
-          oldestAt = candidate.touchedAt
-          oldestKey = key
-        }
-      }
-      if (oldestKey !== undefined) states.delete(oldestKey)
     }
     return state
   }
@@ -497,10 +556,108 @@ function apply(ctx, config) {
       if (hasSeq && state.seen.has(seq)) return
       foldEvent(state, event, pricing)
       if (hasSeq) rememberSeq(state, seq)
-      state.touchedAt = Date.now()
     } catch {
       // A malformed event must never throw into the host's commit path.
     }
+  }
+
+  /**
+   * Seed one descendant. Live children fold `ownEvents()` for free; cold ones are read
+   * from persistence via `sessionQuery.readSession` and sliced at `inheritedEventCount`,
+   * the same drop `ownEvents()` does for a forked live session — the inherited prefix is
+   * the parent's own history, already counted in the parent's state.
+   */
+  async function seedChildState(state, childId, sessions, sessionQuery) {
+    if (state.seeded) return
+    if (state.loading !== undefined) {
+      await state.loading
+      return
+    }
+    let live
+    try {
+      live = sessions !== undefined && typeof sessions.get === 'function' ? sessions.get(childId) : undefined
+    } catch {
+      live = undefined
+    }
+    if (live !== undefined && live !== null) {
+      seedSession(state, live, pricing)
+      return
+    }
+    if (sessionQuery === undefined || typeof sessionQuery.readSession !== 'function') return
+    if (Date.now() < state.nextTryAt) return
+    const loading = (async () => {
+      try {
+        // Deadline race: a stalled storage read must not hold the HTTP handler open —
+        // the badge's contract is "never fail", which includes "never hang".
+        const snapshot = await Promise.race([
+          sessionQuery.readSession(childId),
+          new Promise((_, reject) => {
+            setTimeout(reject, READ_TIMEOUT_MS, new Error('cost-lite: readSession timed out'))
+          }),
+        ])
+        const events = Array.isArray(snapshot?.events) ? snapshot.events : []
+        const skip = Math.max(0, integerOr(snapshot?.inheritedEventCount, 0))
+        seedSessionFromEvents(state, events.slice(skip), pricing)
+      } catch {
+        // A deleted or unreadable child: back off instead of re-hitting storage per poll.
+        state.nextTryAt = Date.now() + READ_RETRY_MS
+      }
+    })()
+    state.loading = loading
+    try {
+      await loading
+    } finally {
+      state.loading = undefined
+    }
+  }
+
+  /**
+   * Bounded BFS over the descendant tree rooted at `rootId` (already seeded by the
+   * caller). `visited` makes a corrupted catalog cycle harmless; `MAX_DESCENDANTS` caps
+   * the walk, so an oversized family under-counts visibly rather than blocking the host.
+   * @returns merged per-model buckets and the number of folded descendant sessions.
+   */
+  async function collectDescendants(rootId, sessions, sessionQuery) {
+    const merged = new Map()
+    const visited = new Set([rootId])
+    const queue = [rootId]
+    let count = 0
+    while (queue.length > 0 && count < MAX_DESCENDANTS) {
+      const currentId = queue.shift()
+      const state = stateFor(currentId)
+      if (currentId !== rootId && !state.seeded) await seedChildState(state, currentId, sessions, sessionQuery)
+      if (state.seeded && currentId !== rootId) {
+        mergeBuckets(merged, state.models)
+        count += 1
+      }
+      // A child's own catalog events were folded with it, so grandchildren queue up the
+      // moment the child becomes seeded.
+      if (state.seeded) {
+        for (const childId of state.childIds) {
+          if (visited.has(childId)) continue
+          visited.add(childId)
+          queue.push(childId)
+        }
+      }
+      // Second discovery channel: the LIVE registry. Some descendants (e.g. teammates
+      // from the agent-team tools) link through `header.parentSession` without writing a
+      // catalog row, so catalog-only folding would miss them. `visited` keeps the two
+      // channels from counting a child twice.
+      if (sessions !== undefined && typeof sessions.list === 'function') {
+        try {
+          for (const live of sessions.list()) {
+            const id = typeof live?.id === 'string' ? live.id : undefined
+            const parent = typeof live?.header?.parentSession === 'string' ? live.header.parentSession : undefined
+            if (id === undefined || parent !== currentId || visited.has(id)) continue
+            visited.add(id)
+            queue.push(id)
+          }
+        } catch {
+          // A registry that refuses to be listed costs us only live-channel discovery.
+        }
+      }
+    }
+    return { models: merged, count }
   }
 
   async function handler(req, res) {
@@ -516,14 +673,15 @@ function apply(ctx, config) {
     }
     try {
       const sessions = ctx.get('sessions')
-      const session = sessions !== undefined && typeof sessions.get === 'function' ? sessions.get(sessionId) : undefined
-      if (session === undefined || session === null) {
-        sendJson(res, 200, buildEmptyPayload(sessionId, pricing))
-        return
-      }
+      const sessionQuery = ctx.get('sessionQuery')
       const state = stateFor(sessionId)
-      if (!state.seeded) seedSession(state, session, pricing)
-      sendJson(res, 200, buildPayload(sessionId, state, pricing))
+      // The root seeds through the SAME path as a descendant: live => ownEvents();
+      // disposed/finished (one-shot subagents, closed parents) => cold readSession slice
+      // at inheritedEventCount. A bogus or unreadable id simply stays unseeded: the
+      // payload below is all-zero, `priced:false`, no badge — same "never fail" contract.
+      if (!state.seeded) await seedChildState(state, sessionId, sessions, sessionQuery)
+      const descendants = await collectDescendants(sessionId, sessions, sessionQuery)
+      sendJson(res, 200, buildPayload(sessionId, state, pricing, descendants))
     } catch {
       // Never fail the badge: an unreachable/detached session is an empty answer.
       sendJson(res, 200, buildEmptyPayload(sessionId, pricing))

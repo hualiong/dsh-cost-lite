@@ -1,7 +1,7 @@
 {
   "name": "@hualiong/dsh-cost-lite",
-  "version": "0.1.3",
-  "description": "Real-money cost badges for DeepSeek Harness: a 「计费用量」 pill in the composer dock (session) and in each assistant message's action row (per turn), priced per model from the session's own token usage, with off-peak/peak tiers and official-provider-only billing.",
+  "version": "0.2.1",
+  "description": "Real-money cost badges for DeepSeek Harness: a 「计费用量」 pill in the composer dock (or the session header on subagent pages whose composer is replaced; session scope, including all subagent descendants) and in each assistant message's action row (per turn), priced per model from the session token usage, with off-peak/peak tiers and official-provider-only billing.",
   "type": "module",
   "license": "MIT",
   "keywords": [

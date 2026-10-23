@@ -41,6 +41,10 @@ window.__ModuleLoader__.load({
     const SESSION_ID = 'cost-lite-session'
     const TURN_SLOT = 'conversation.chat.assistant-actions'
     const TURN_ID = 'cost-lite-turn'
+    // Fallback mount for the session badge: pages whose composer was replaced (one-shot /
+    // parentless subagent children) have no dock, but still render the session header.
+    const HEADER_SLOT = 'conversation.session.header.actions'
+    const HEADER_ID = 'cost-lite-header'
     const ENDPOINT = '/__cost-lite/usage'
     const POLL_MS = 2000
     const PANEL_GAP = 8 // built-in stat dialog gap
@@ -64,6 +68,8 @@ window.__ModuleLoader__.load({
       'cacheRead': '缓存读取',
       'cacheWrite': '缓存写入',
       'output': '输出',
+      // Session-scope row: what the descendant agents (subagents/teammates) cost in total.
+      'subagents': '子智能体',
       // FULLWIDTH YEN SIGN (U+FFE5), not the halfwidth ¥ + space: the fullwidth glyph
       // carries its own side bearing, so 「￥0.93」 needs no separating space.
       'perMillion': '￥{price}/M',
@@ -78,6 +84,7 @@ window.__ModuleLoader__.load({
       'cacheRead': 'Cache read',
       'cacheWrite': 'Cache write',
       'output': 'Output',
+      'subagents': 'Subagents',
       'perMillion': '￥{price}/M',
     }
 
@@ -276,6 +283,14 @@ window.__ModuleLoader__.load({
     function detailRows(record, isTurn, t) {
       const rows = []
       const models = Array.isArray(record.models) ? record.models : []
+      // Session scope only, and FIRST under the title (user request m00313): the descendant
+      // cost is already folded into the headline amount, so this row leads with the family
+      // split. The value is the plain sum — children mix models and run modes, so there is
+      // no single rate to print next to it (user request: 直接展示费用).
+      const sub = record.subagents
+      if (!isTurn && sub !== null && typeof sub === 'object' && sub.count > 0) {
+        rows.push(row('subagents', t('subagents'), formatCny(sub.cost)))
+      }
       // Only the per-turn popover names the provider/model, to line up with the built-in
       // 「本轮用量」 panel. A session can span several models and its badge is about the
       // session total, so the route row is skipped there.
@@ -379,18 +394,60 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    // --- the two registered badges --------------------------------------------------
+    // --- the three registered badges ------------------------------------------------
 
     // Both badges render ONLY once the host has positively priced the scope (user request:
     // no 「—」 placeholder). `usage.priced` is the session TOTAL's flag: the host drops every
     // unregistered model entirely and sets the flag when at least one bucket resolved
-    // (`index.js:361`), so a session mixing DeepSeek with an unknown model still shows the
-    // DeepSeek part, while a session whose models are all unknown shows nothing at all.
-    function SessionCostBadge({ sessionId, t }) {
-      const usage = useCostUsage(sessionId)
+    // (`index.js:361`) — own log OR any descendant — so a session mixing DeepSeek with an
+    // unknown model still shows the DeepSeek part, and an unpriced parent whose subagents
+    // cost something still shows the family total.
+    /**
+     * Mirror of ui-subagent's `selectReadOnlySubagent` (packages/subagent/ui-subagent/src/
+     * client/index.ts:37-49): that entry replaces the whole composer at priority -10 for
+     * exactly these sessions, and the read-only composer renders no dock slot — so our dock
+     * badge has nowhere to mount there and the header fallback takes over instead. Kept
+     * complementary so every page shows exactly one session badge.
+     */
+    function composerReplacedFor(session) {
+      if (session === null || typeof session !== 'object') return false
+      const sub = session.subagent
+      if (sub === null || typeof sub !== 'object') return false
+      const mode = sub.address !== null && typeof sub.address === 'object' ? sub.address.mode : undefined
+      if (mode === 'unknown' || mode === 'one-shot') return true
+      if (sub.parentAvailable !== false) return false
+      return session.running !== true
+    }
+
+    /** Shared body of the two session-badge mounts (dock + header fallback). */
+    function SessionBadgeContent({ usage, t }) {
       const session = usage !== null && typeof usage.session === 'object' && usage.session !== null ? usage.session : null
       if (session === null || usage.priced !== true || typeof session.cost !== 'number') return null
-      return React.createElement(CostBadge, { record: session, isTurn: false, t })
+      // Headline the WHOLE-session cost (own + descendants, host-summed); `allCost` is
+      // absent on older hosts, where the own cost alone is still the right number.
+      // `subagents` rides along on the record so the popover can render its row.
+      const record = {
+        ...session,
+        cost: typeof usage.allCost === 'number' ? usage.allCost : session.cost,
+        subagents: usage.subagents,
+      }
+      return React.createElement(CostBadge, { record, isTurn: false, t })
+    }
+
+    function SessionCostBadge({ sessionId, useSession, t }) {
+      const usage = useCostUsage(sessionId)
+      // Defensive: if the runner ever hands a dock entry without the session hook, fall
+      // back to today's behaviour (always render) rather than losing the badge entirely.
+      const replaced = typeof useSession === 'function' ? useSession(composerReplacedFor) : false
+      if (replaced === true) return null
+      return React.createElement(SessionBadgeContent, { usage, t })
+    }
+
+    function HeaderCostBadge({ sessionId, useSession, t }) {
+      const usage = useCostUsage(sessionId)
+      const replaced = typeof useSession === 'function' ? useSession(composerReplacedFor) : false
+      if (replaced !== true) return null
+      return React.createElement(SessionBadgeContent, { usage, t })
     }
 
     /**
@@ -440,6 +497,14 @@ window.__ModuleLoader__.load({
         locale: NS,
         inject: injectProps,
       }, SessionCostBadge))
+
+      ctx.slots.inject(HEADER_SLOT, () => ctx.slots.register({
+        name: HEADER_SLOT,
+        id: HEADER_ID,
+        order: 30,
+        locale: NS,
+        inject: injectProps,
+      }, HeaderCostBadge))
 
       ctx.slots.inject(TURN_SLOT, () => ctx.slots.register({
         name: TURN_SLOT,

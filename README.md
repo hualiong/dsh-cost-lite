@@ -6,8 +6,9 @@ DSH 的**真实花费**徽标：把本会话的 token 用量按模型价目换�
 | --- | --- | --- | --- |
 | 每条助手消息的操作行（显示该消息所属**整轮**的合计） | `conversation.chat.assistant-actions` | `cost-lite-turn`（order 20） | `计费 0.01 元` |
 | 输入框停靠栏 | `conversation.composer.dock` | `cost-lite-session`（order 5） | `3.42 元` |
+| 子智能体会话顶栏（仅当输入框被只读替代、停靠栏不存在时） | `conversation.session.header.actions` | `cost-lite-header`（order 30） | `3.42 元` |
 
-点开任一徽标是一个与内置统计弹窗同款的浮层：标题是 `￥` 金额，下面按桶列出金额与单价（`未缓存输入 / 缓存读取 / 缓存写入 / 输出`，单价以 `￥x.xx/M` 表示）——**金额按各桶分别计价后相加**，与标题 6 位小数一致。操作行那个徽标的口径是**整轮**（一轮有多条助手消息，同一轮的每条消息显示同一个金额），因此它多一行「提供方 / 模型」，数字与内置「本轮用量」面板对齐；停靠栏那个是**整个会话**的合计，不列模型行。
+点开任一徽标是一个与内置统计弹窗同款的浮层：标题是 `￥` 金额，下面按桶列出金额与单价（`未缓存输入 / 缓存读取 / 缓存写入 / 输出`，单价以 `￥x.xx/M` 表示）——**金额按各桶分别计价后相加**，与标题 6 位小数一致。操作行那个徽标的口径是**整轮**（一轮有多条助手消息，同一轮的每条消息显示同一个金额），因此它多一行「提供方 / 模型」，数字与内置「本轮用量」面板对齐；停靠栏/顶栏那个是**整个会话**的合计，不列模型行，但当会话派生了子智能体（subagent / teammate）时会在**标题下方第一行**列出「子智能体」，直接给出全部后代会话的合计金额（不带单价——后代可能混着模型和运行方式，没有单一价格可印）。会话徽标的两处挂点互斥（镜像内置只读输入框的接管条件），每个页面恰好一个；一次性子智能体或父会话已关闭的可续会话没有停靠栏，徽标改挂在顶栏动作区。
 
 ## 计费口径
 
@@ -16,6 +17,7 @@ DSH 的**真实花费**徽标：把本会话的 token 用量按模型价目换�
 * **价目**（CNY / 1M tokens，取自 <https://api-docs.deepseek.com/zh-cn/quick_start/pricing>，读取于 2026-10-11）：Flash 空闲 `缓存未命中 1 / 缓存命中 0.02 / 输出 4`；V4 Pro `4.5 / 0.15 / 13.5`（DeepSeek 只公布三档，`缓存写入` 记为 0）。
 * **高峰时段**：北京时间周一至周五 `9:00-12:00`、`14:00-18:00` 为高峰，价目 ×2；周末与法定节假日全天按空闲价。时段按**该条事件自己的 `time`**（epoch 毫秒，落盘后不再变）判定，所以同一个数不会在两次轮询之间漂移。节假日内置 2026 年列表（`src/index.js` 的 `PEAK_HOLIDAYS`），需要按年补充；未收录的工作日节假日会按高峰计价（只会高估，不会低估）。
 * **未知组合**：在折叠阶段就整条跳过（不计 token、不产生 message/turn 条目），响应里 `priced: false`，两端徽标都不渲染，绝不猜价。
+* **子智能体**：会话徽标与「子智能体」行统计整个后代树（subagent、teammate，含孙辈）。发现有两个通道：父会话日志里的 `subagent/catalog` 事件，以及活会话登记表里 `header.parentSession` 指向本会话的项（teammate 这类不写目录行的子会话靠后者）；两通道按 id 去重。每个后代只折叠它**自己的**事件段（live 用 `ownEvents()`，冷会话经 `sessionQuery.readSession` 按 `inheritedEventCount` 切片），fork 继承的父前缀不会重复计费。**被查询的会话本身**也走同一条 live/冷读取路径（0.2.1 起）：一次性子智能体或已关闭的会话即使不在活登记表里，也会按自己的日志计价。折叠遵守同一套价目与高峰规则；上限 128 个后代，超出部分不计。轮级徽标口径不变（仅本会话该轮）。
 
 ## 安装
 
@@ -47,7 +49,7 @@ profile 自己的 patch 文件按 `id: cost-lite` 覆盖该行来传配置（`co
 
 * 宿主半边（`src/index.js`、`src/pricing.js`）改动需要**重启 DSH**：运行时按解析到的模块 URL 缓存，文件改了也不会重新 import。
 * 浏览器半边（`src/client.js`）由宿主按 mtime 生成 `rev` 提供，改完**刷新页面**即可。
-* HTTP 接口：`GET /__cost-lite/usage?sessionId=<id>`，返回 `{ ok, sessionId, currency, priced, session, messages, turns }`，响应头 `cache-control: no-store`。`messages` 以 MessageId 为键、`turns` 以轮号为键。
+* HTTP 接口：`GET /__cost-lite/usage?sessionId=<id>`，返回 `{ ok, sessionId, currency, priced, allCost, session, messages, turns, subagents }`，响应头 `cache-control: no-store`。`messages` 以 MessageId 为键、`turns` 以轮号为键。`allCost` = 本会话 + 全部后代的合计（会话徽标显示它）；`subagents` = `{ count, priced, cost, totalTokens }`。
 
 ## 许可
 
