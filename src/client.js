@@ -15,11 +15,13 @@ window.__ModuleLoader__.load({
   id: '@hualiong/dsh-cost-lite',
   factory: (require) => {
     const React = require('react')
-    const { useCallback, useEffect, useRef, useState } = React
+    const { useCallback, useEffect, useId, useRef, useState } = React
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     // The built-in chat bundle calls exactly these with exactly these shapes, so they
-    // are called directly here rather than probed behind fallbacks.
-    const { IconDatabaseOutlineRegular, useAnchoredPosition, useDismissOnOutsidePointer } = primitives
+    // are called directly here rather than probed behind fallbacks. Panel placement is
+    // CSS Anchor Positioning, so this half imports no positioning hook:
+    // `useAnchoredPosition` was removed from the primitives in DSH v0.2.2-alpha.2.
+    const { IconDatabaseOutlineRegular, useDismissOnOutsidePointer } = primitives
     // The badge glyph, in one place so it is a one-line swap. The built-in set ships 97
     // `Icon*OutlineRegular` components and NONE of them is money/coin/wallet/currency, so
     // there is no dedicated billing icon; the near-misses either read wrong or collide with a
@@ -47,9 +49,6 @@ window.__ModuleLoader__.load({
     const HEADER_ID = 'cost-lite-header'
     const ENDPOINT = '/__cost-lite/usage'
     const POLL_MS = 2000
-    const PANEL_GAP = 8 // built-in stat dialog gap
-    const PANEL_MARGIN = 12 // built-in stat dialog viewport margin
-    const MEASURE_STYLE = { visibility: 'hidden', left: 0, top: 0 }
     const P = 'clite' // our own CSS-module prefix (never collide with Rd79tq_/iq1doa_/Xt1eiG_)
 
     // --- locale -----------------------------------------------------------------
@@ -120,8 +119,17 @@ window.__ModuleLoader__.load({
       // The built-in collapses its label to an icon-only square below 480px; mirroring
       // it keeps the two neighbours the same width on narrow screens.
       `@media (width<=480px){button.${P}_pill.${P}_turn{width:calc(28px + var(--dsh-content-font-delta,0px));justify-content:center;padding:6px}.${P}_pill.${P}_turn .${P}_label{display:none}}`,
-      // stat-dialog.module.css, verbatim except prefix
-      `.${P}_panel{z-index:1100;box-sizing:border-box;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);backdrop-filter:var(--dsw-menu-backdrop-filter);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-secondary);cursor:default;border:0;padding:16px;font-size:12px;line-height:18px;position:fixed}`,
+      // stat-dialog.module.css, verbatim except prefix. Placement is CSS Anchor
+      // Positioning: the trigger carries `anchor-name`, this panel carries
+      // `position-anchor`, and the rules below pin it above the trigger with a 12px
+      // window inset. The `@position-try` fallbacks cover a trigger near the window
+      // top, a short window, and a narrow one, exactly like the built-in dialog.
+      `.${P}_panel{position:fixed;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);padding:16px;border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);cursor:default;max-height:calc(100dvh - 12px - max(12px,var(--dsh-frame-overlay-top,12px)));overflow-x:hidden;overflow-y:auto;--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);position-area:none;top:max(12px,var(--dsh-frame-overlay-top,12px));bottom:max(12px,calc(anchor(top) + 8px));left:max(12px,anchor(left));right:12px;position-try-fallbacks:--clite-window,--clite-opposite,--clite-wide-opposite,--clite-tall,--clite-viewport;align-self:end;justify-self:start;height:fit-content;min-height:0;margin:0}`,
+      `@position-try --clite-window{position-area:none;top:max(12px,var(--dsh-frame-overlay-top,12px));bottom:max(12px,calc(anchor(top) + 8px));left:12px;right:12px;margin:0;align-self:safe end;justify-self:safe end}`,
+      `@position-try --clite-opposite{top:max(12px,calc(anchor(bottom) + 8px));bottom:12px;align-self:start}`,
+      `@position-try --clite-wide-opposite{top:max(12px,calc(anchor(bottom) + 8px));bottom:12px;left:12px;right:12px;align-self:start;justify-self:safe end}`,
+      `@position-try --clite-tall{position-area:none;top:max(12px,var(--dsh-frame-overlay-top,12px));bottom:12px;left:max(12px,anchor(left));right:12px;margin:0;align-self:safe start;justify-self:start}`,
+      `@position-try --clite-viewport{position-area:none;inset:max(12px,var(--dsh-frame-overlay-top,12px)) 12px 12px;margin:0;align-self:safe start;justify-self:safe end}`,
       `.${P}_title{color:var(--dsw-alias-label-primary);justify-content:space-between;gap:16px;margin-bottom:8px;font-weight:500;display:flex}`,
       `.${P}_titleRule{border-top:.5px solid var(--dsw-alias-border-l2);margin-bottom:10px}`,
       `.${P}_titleValue{font-variant-numeric:tabular-nums}`,
@@ -325,14 +333,11 @@ window.__ModuleLoader__.load({
       const panelRef = useRef(null)
       const toggle = useCallback(() => setOpen((value) => !value), [])
       const close = useCallback(() => setOpen(false), [])
-      const pos = useAnchoredPosition({
-        open,
-        anchorRef: rootRef,
-        panelRef,
-        side: 'top',
-        gap: PANEL_GAP,
-        margin: PANEL_MARGIN,
-      })
+      // CSS Anchor Positioning (DSH removed `useAnchoredPosition` in v0.2.2-alpha.2):
+      // the trigger advertises this name, the portaled panel points back at it, and
+      // the `--clite-panel` anchor rules do the placement. A per-mount name keeps two
+      // open dialogs (session + turn) from anchoring to each other.
+      const anchorName = `--clite-${useId().replaceAll(':', '')}`
       useDismissOnOutsidePointer(rootRef, open, close, panelRef)
       useEffect(() => {
         if (!open) return undefined
@@ -357,7 +362,7 @@ window.__ModuleLoader__.load({
         className: cx('panel'),
         role: 'dialog',
         'aria-label': t('title'),
-        style: pos === null || pos === undefined ? MEASURE_STYLE : pos,
+        style: { positionAnchor: anchorName },
       }, [
         React.createElement('div', { key: 'title', className: cx('title') }, [
           React.createElement('span', { key: 'label', className: cx('titleLabel') }, [
@@ -374,6 +379,7 @@ window.__ModuleLoader__.load({
       return React.createElement('span', {
         ref: rootRef,
         className: cx('root'),
+        style: { anchorName },
       }, [
         React.createElement('button', {
           key: 'trigger',
